@@ -1,10 +1,117 @@
 # agent-sync
 
-`agent-sync` is an app-agnostic continuity service for agentic coding sessions. It records checkpoints from Claude Code/Codex-compatible hooks and exposes a small JSON CLI that agents can use to list, hand off, and claim conversations across machines.
+`agent-sync` helps coding agents resume work across machines.
 
-V1 is intentionally CLI-first. MCP support remains experimental; the recommended agent distribution path is the `skills/agent-sync-resume` Agent Skill plus hook configuration.
+It records lightweight conversation checkpoints from Claude Code and Codex hooks, stores them in a synced folder, and gives agents a small JSON CLI for listing recent sessions, claiming a session, pulling the intended branch, and restoring captured dirty work.
+
+Conductor is supported when it runs Claude Code or Codex under the hood and emits one of those hook formats.
+
+## What It Does
+
+- Tracks app-agnostic coding conversations across machines.
+- Captures checkpoints from Claude Code and Codex hook payloads.
+- Stores checkpoint summaries, repo metadata, transcripts when available, tracked patches, and non-ignored untracked files.
+- Lets an agent list recent sessions and build a compact handoff plan.
+- Lets an agent claim/resume a session, fetch/pull the intended branch, and refresh stored repo state.
+- Provides an explicit dirty restore command for checkpoint patch artifacts.
+- Installs global Codex and Claude skills/hooks so setup is not per-repo.
+
+`agent-sync` does not mutate native Claude Code, Codex, or Conductor conversation databases. Resumption happens through the CLI and installed agent skill.
+
+## Storage
+
+By default, checkpoints are stored in iCloud Drive:
+
+```text
+~/Library/Mobile Documents/com~apple~CloudDocs/agent-sync
+```
+
+Override the store with either:
+
+```bash
+export AGENT_SYNC_ROOT="$HOME/path/to/synced/agent-sync"
+```
+
+or pass `--sync-root` to any command.
+
+The store uses append-only JSONL event logs plus content-addressed immutable objects for transcripts, patches, and file snapshots. There is no synced SQLite database.
+
+## Install
+
+Install the latest release binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/palexander/agent-sync/main/scripts/install-release.sh | bash
+```
+
+The installer:
+
+1. Detects OS and CPU architecture.
+2. Downloads the matching release tarball.
+3. Verifies the SHA-256 checksum.
+4. Installs `agent-sync` to `~/.local/bin`.
+5. Installs global Codex and Claude skills/hooks.
+6. Runs hook and storage diagnostics.
+
+If `~/.local/bin` is not on your `PATH`, add this to your shell profile:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Supported release targets:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `x86_64-unknown-linux-gnu`
+
+Linux users should set `AGENT_SYNC_ROOT` to a real synced folder, because the default path is the macOS iCloud Drive location.
+
+## Install From Source
+
+```bash
+git clone https://github.com/palexander/agent-sync.git
+cd agent-sync
+cargo install --path . --force
+agent-sync install all
+agent-sync doctor --hooks --storage
+```
+
+For a source checkout, the helper script does the same build/install/diagnostic flow:
+
+```bash
+bash scripts/install.sh
+```
+
+## Agent Workflow
+
+After installation, ask your agent to use the `agent-sync-resume` skill.
+
+Typical prompts:
+
+```text
+List my recent agent-sync sessions.
+```
+
+```text
+Resume the session I was working on from my MacBook.
+```
+
+```text
+Resume conversation conv_... in this repo.
+```
+
+The agent should:
+
+1. Run `agent-sync recent` to list candidates.
+2. Ask you to confirm the conversation.
+3. Run `agent-sync handoff <conversation-id>` to get compact context.
+4. Run `agent-sync resume <conversation-id> --cwd "$PWD"` to claim and refresh the repo.
+5. Run `agent-sync apply-dirty <checkpoint-id> --cwd "$PWD"` if the handoff includes dirty artifacts and you want them restored.
 
 ## Commands
+
+Most operational commands print JSON. `doctor` prints a compact text report by default; use `doctor --hooks --storage` for JSON diagnostics.
 
 ```bash
 agent-sync recent --limit 10
@@ -28,51 +135,52 @@ agent-sync doctor
 agent-sync doctor --hooks --storage
 ```
 
-All agent-facing commands print JSON.
+Key commands:
 
-## Install From Release
+- `recent`: Lists recent conversations with id, title, host, repo, branch, head, and status.
+- `handoff`: Builds compact resume context and warnings for one conversation.
+- `resume`: Claims the conversation, fetches/pulls the branch from origin, and refreshes stored repo metadata.
+- `apply-dirty`: Applies tracked checkpoint patches and restores non-ignored untracked files captured by a checkpoint.
+- `checkpoint`: Creates a checkpoint manually. By default it auto-matches an existing conversation by repo and branch; use `--new` to force a distinct conversation.
+- `sandbox`: Reports whether the process can write the sync root and local `.git` metadata.
+- `install`: Installs global agent skills and hooks for `codex`, `claude`, or `all`.
+- `doctor --hooks --storage`: Validates hook config, skill installation, and storage visibility.
+- `validate-sync`: Performs a write/read/delete probe against the configured sync root.
+- `prune`: Dry-runs removal of unreferenced objects. Add `--execute` to delete them.
 
-The recommended install path is the latest GitHub release binary:
+## Hook Behavior
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/palexander/agent-sync/main/scripts/install-release.sh | bash
-```
+`agent-sync install all` installs managed hook entries for Codex and Claude. Existing hook files are backed up before they are modified.
 
-The installer detects macOS/Linux and CPU architecture, downloads the matching release tarball, verifies its SHA-256 checksum, installs `agent-sync` to `~/.local/bin`, then runs:
+Only stop/compaction-style hook events create checkpoints. Other installed hook entries are compatibility hooks and do not create extra checkpoints.
 
-```bash
-agent-sync install all
-agent-sync doctor --hooks --storage
-```
+Hooks are fail-open: hook failures should not block the source agent.
 
-If `~/.local/bin` is not on your `PATH`, add this to your shell profile:
+## Dirty Work
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+Checkpoints capture:
 
-Supported release targets:
+- staged tracked changes as patches
+- unstaged tracked changes as patches
+- non-ignored untracked files as file artifacts
 
-- `aarch64-apple-darwin`
-- `x86_64-apple-darwin`
-- `x86_64-unknown-linux-gnu`
-
-## Local Install
-
-```bash
-cargo install --path /Users/palexander/Documents/agent-sync --force
-agent-sync install all
-```
-
-`install all` installs global Codex/Claude skills and merges hook entries into the user configs with timestamped backups.
-
-For a repeatable local install:
+Dirty artifacts are not applied automatically during `resume`. Use:
 
 ```bash
-bash /Users/palexander/Documents/agent-sync/scripts/install.sh
+agent-sync apply-dirty <checkpoint-id> --cwd "$PWD"
 ```
 
-That builds the binary, installs both skills/hooks, runs hook/storage diagnostics, and validates the configured sync root.
+`apply-dirty` refuses to modify a dirty worktree unless you pass `--force`.
+
+## Sandbox Notes
+
+Some agent environments restrict filesystem writes or Git metadata updates. Check the current process with:
+
+```bash
+agent-sync sandbox --cwd "$PWD"
+```
+
+If `.git` or the sync root is not writable, `resume` returns JSON describing the blocked operation instead of mutating the repo.
 
 ## Release Process
 
@@ -81,36 +189,8 @@ CI runs formatting, Clippy, and tests on pushes to `main` and pull requests.
 To publish a release:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-The release workflow builds platform tarballs, publishes checksum files, and creates a GitHub release with generated notes.
-
-## Handoff behavior
-
-- `resume` is the preferred agent path. It claims the conversation, fetches/pulls the branch, and refreshes stored repo state.
-- `apply-dirty` restores tracked patches and non-ignored untracked file artifacts captured by a checkpoint.
-- `checkpoint` auto-matches an existing conversation by repo and branch for hook continuity. Use `--new` when a human intentionally starts a distinct task on the same branch.
-- `sandbox` reports whether the current agent process can write `.git` metadata and the sync root.
-- `validate-sync` performs a real write/read/delete probe against the configured sync root.
-- `doctor --hooks --storage` validates global skill installation, hook JSON, managed hook entries, and storage stats.
-- `prune` is dry-run by default. Use `--execute` to remove unreferenced objects. `--older-than 30d` only prunes unreferenced objects older than the requested age.
-
-## Default Store
-
-```text
-~/Library/Mobile Documents/com~apple~CloudDocs/agent-sync
-```
-
-Override with `--sync-root` or `AGENT_SYNC_ROOT`.
-
-## Sandbox Notes
-
-If an agent is running in a restricted sandbox, ask it to run:
-
-```bash
-agent-sync sandbox --cwd "$PWD"
-```
-
-When `.git` or the sync root is not writable, `resume` returns JSON with the commands/context it could not execute instead of mutating the repo. In that case, run `agent-sync resume ...` from an unsandboxed shell or let an unsandboxed agent perform the handoff.
+The release workflow builds platform tarballs, publishes SHA-256 checksum files, and creates a GitHub release with generated notes.
