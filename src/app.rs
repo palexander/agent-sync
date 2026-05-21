@@ -390,7 +390,14 @@ impl AgentSync {
     pub fn get_handoff_plan(&self, id: &str) -> Result<HandoffPlan> {
         let conversation = self.store.read_conversation(id)?;
         let checkpoint = self.latest_checkpoint(id)?;
+        let effective_status = self.effective_status(&conversation)?;
         let mut warnings = Vec::new();
+        if effective_status != ConversationStatus::Active {
+            warnings.push(format!(
+                "conversation is currently {} based on owner lease state",
+                status_name(&effective_status)
+            ));
+        }
         if checkpoint.as_ref().map(|c| c.summary_poor).unwrap_or(true) {
             warnings.push("latest checkpoint has no agent-generated summary".to_string());
         }
@@ -403,8 +410,9 @@ impl AgentSync {
         }
         let resume_context = match checkpoint.as_ref() {
             Some(c) => format!(
-                "Conversation: {}\nCheckpoint: {}\nHost: {}\nRepo: {}\nBranch: {}\nHead: {}\nSummary: {}\nLast: {}",
+                "Conversation: {}\nStatus: {}\nCheckpoint: {}\nHost: {}\nRepo: {}\nBranch: {}\nHead: {}\nSummary: {}\nLast: {}",
                 conversation.title,
+                status_name(&effective_status),
                 c.id,
                 c.hostname,
                 c.repo.remote_url.clone().unwrap_or_else(|| "unknown".to_string()),
@@ -413,7 +421,11 @@ impl AgentSync {
                 c.summary.clone().unwrap_or_else(|| "(no summary available)".to_string()),
                 c.last_assistant_message.clone().unwrap_or_else(|| "(none)".to_string())
             ),
-            None => format!("Conversation: {}\nNo checkpoint is available.", conversation.title),
+            None => format!(
+                "Conversation: {}\nStatus: {}\nNo checkpoint is available.",
+                conversation.title,
+                status_name(&effective_status)
+            ),
         };
         Ok(HandoffPlan {
             conversation_id: conversation.id,
@@ -429,6 +441,7 @@ impl AgentSync {
         let host = checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.hostname.clone());
+        let status = self.effective_status(&conversation)?;
         Ok(ConversationSummary {
             id: conversation.id,
             title: conversation.title,
@@ -436,7 +449,7 @@ impl AgentSync {
             repo: conversation.primary_repo.remote_url,
             branch: conversation.primary_repo.branch,
             head: conversation.primary_repo.head,
-            status: conversation.status,
+            status,
             updated_at: conversation.updated_at,
         })
     }
@@ -449,6 +462,49 @@ impl AgentSync {
             }
         }
         Ok(latest)
+    }
+
+    fn effective_status(&self, conversation: &Conversation) -> Result<ConversationStatus> {
+        if matches!(
+            conversation.status,
+            ConversationStatus::Archived | ConversationStatus::Diverged
+        ) {
+            return Ok(conversation.status.clone());
+        }
+
+        let Some(owner_session_id) = &conversation.current_owner_session_id else {
+            return Ok(ConversationStatus::Claimable);
+        };
+
+        let Some(owner_session) = self.machine_session(&conversation.id, owner_session_id)? else {
+            return Ok(ConversationStatus::Stale);
+        };
+
+        if owner_session.status != MachineSessionStatus::Active {
+            return Ok(ConversationStatus::Stale);
+        }
+
+        if owner_session.lease_expires_at <= Utc::now() {
+            return Ok(ConversationStatus::Stale);
+        }
+
+        Ok(ConversationStatus::Active)
+    }
+
+    fn machine_session(
+        &self,
+        conversation_id: &str,
+        session_id: &str,
+    ) -> Result<Option<MachineSession>> {
+        let mut matched = None;
+        for event in self.store.read_events(conversation_id)? {
+            if let Event::MachineSessionUpserted { session } = event {
+                if session.id == session_id {
+                    matched = Some(session);
+                }
+            }
+        }
+        Ok(matched)
     }
 
     fn match_conversation(&self, repo: &RepoState) -> Result<Option<Conversation>> {
@@ -486,6 +542,16 @@ impl AgentSync {
 
 fn tempfile_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()))
+}
+
+fn status_name(status: &ConversationStatus) -> &'static str {
+    match status {
+        ConversationStatus::Active => "active",
+        ConversationStatus::Stale => "stale",
+        ConversationStatus::Claimable => "claimable",
+        ConversationStatus::Diverged => "diverged",
+        ConversationStatus::Archived => "archived",
+    }
 }
 
 pub fn detect_sandbox_for_config(config: &Config, cwd: Option<PathBuf>) -> SandboxReport {
@@ -555,6 +621,18 @@ mod tests {
         AgentSync::new(config).unwrap()
     }
 
+    fn test_app_with_lease_timeout(lease_timeout_seconds: i64) -> AgentSync {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let mut config = Config::resolve(
+            Some(dir.join("sync")),
+            Some(dir.join("cache")),
+            Some("host-a".into()),
+        )
+        .unwrap();
+        config.lease_timeout_seconds = lease_timeout_seconds;
+        AgentSync::new(config).unwrap()
+    }
+
     #[test]
     fn claim_marks_new_owner() {
         let app = test_app();
@@ -599,5 +677,35 @@ mod tests {
             .rebuild_from_events(&checkpoint.conversation_id)
             .unwrap();
         assert_eq!(counts.get("checkpoint_created"), Some(&1));
+    }
+
+    #[test]
+    fn summaries_derive_stale_status_from_expired_owner_lease() {
+        let app = test_app_with_lease_timeout(-1);
+        let cwd = tempfile::tempdir().unwrap();
+        let checkpoint = app
+            .create_checkpoint(CheckpointInput {
+                cwd: cwd.path().to_path_buf(),
+                title: Some("test".into()),
+                conversation_id: None,
+                new_conversation: false,
+                summary: Some("summary".into()),
+                last_assistant_message: None,
+                provenance: HookProvenance::default(),
+            })
+            .unwrap();
+
+        let stored = app.get_conversation(&checkpoint.conversation_id).unwrap();
+        assert_eq!(stored.status, ConversationStatus::Active);
+
+        let summary = app.list_recent_summaries(1).unwrap().remove(0);
+        assert_eq!(summary.status, ConversationStatus::Stale);
+
+        let handoff = app.get_handoff_plan(&checkpoint.conversation_id).unwrap();
+        assert!(handoff.resume_context.contains("Status: stale"));
+        assert!(handoff
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("currently stale")));
     }
 }
