@@ -212,6 +212,17 @@ pub struct UpdateReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionCheckReport {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub checked_at: DateTime<Utc>,
+    pub cache_hit: bool,
+    pub instructions: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookDoctorReport {
     pub targets: Vec<HookTargetDoctorReport>,
     pub ok: bool,

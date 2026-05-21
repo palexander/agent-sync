@@ -79,6 +79,7 @@ enum Command {
         target: InstallTargetArg,
     },
     Update,
+    VersionCheck,
     ValidateSync,
     Storage,
     Prune {
@@ -247,6 +248,13 @@ pub async fn run() -> Result<()> {
         }
         Command::Update => {
             println!("{}", serde_json::to_string_pretty(&update::update()?)?);
+            Ok(())
+        }
+        Command::VersionCheck => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&update::version_check(&config)?)?
+            );
             Ok(())
         }
         Command::ValidateSync => {

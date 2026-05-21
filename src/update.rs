@@ -1,10 +1,21 @@
-use crate::domain::{CommandOutcome, UpdateReport};
+use crate::config::Config;
+use crate::domain::{CommandOutcome, UpdateReport, VersionCheckReport};
 use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
 
 const DEFAULT_REPO: &str = "palexander/agent-sync";
+const VERSION_CHECK_TTL_SECONDS: i64 = 60 * 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VersionCache {
+    latest_version: Option<String>,
+    checked_at: DateTime<Utc>,
+    warnings: Vec<String>,
+}
 
 pub fn update() -> Result<UpdateReport> {
     let from_version = env!("CARGO_PKG_VERSION").to_string();
@@ -109,6 +120,123 @@ pub fn update() -> Result<UpdateReport> {
         doctor,
         warnings,
     })
+}
+
+pub fn version_check(config: &Config) -> Result<VersionCheckReport> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let cache_path = config.cache_root.join("latest-version.json");
+    let now = Utc::now();
+    let cached = read_fresh_cache(&cache_path, now);
+    let cache_hit = cached.is_some();
+    let cache = match cached {
+        Some(cache) => cache,
+        None => {
+            let cache = fetch_latest_version(now);
+            write_cache(&cache_path, &cache)?;
+            cache
+        }
+    };
+    let update_available = cache
+        .latest_version
+        .as_deref()
+        .map(|latest| version_is_newer(&current_version, latest))
+        .unwrap_or(false);
+    let instructions = if update_available {
+        vec![
+            "Run `agent-sync update`.".to_string(),
+            "Then run `agent-sync doctor --hooks --storage`.".to_string(),
+            "Then retry your original agent-sync command.".to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    Ok(VersionCheckReport {
+        current_version,
+        latest_version: cache.latest_version,
+        update_available,
+        checked_at: cache.checked_at,
+        cache_hit,
+        instructions,
+        warnings: cache.warnings,
+    })
+}
+
+fn read_fresh_cache(path: &Path, now: DateTime<Utc>) -> Option<VersionCache> {
+    let cache: VersionCache = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if now.signed_duration_since(cache.checked_at) < Duration::seconds(VERSION_CHECK_TTL_SECONDS) {
+        Some(cache)
+    } else {
+        None
+    }
+}
+
+fn fetch_latest_version(checked_at: DateTime<Utc>) -> VersionCache {
+    let repo = std::env::var("AGENT_SYNC_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_string());
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let output = Command::new("curl")
+        .args(["-fsSL", "-H", "User-Agent: agent-sync", &url])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let latest_version = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("tag_name")
+                        .and_then(|tag| tag.as_str())
+                        .map(|version| strip_v(version).to_string())
+                });
+            VersionCache {
+                latest_version,
+                checked_at,
+                warnings: Vec::new(),
+            }
+        }
+        Ok(output) => VersionCache {
+            latest_version: None,
+            checked_at,
+            warnings: vec![format!(
+                "latest release check failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )],
+        },
+        Err(err) => VersionCache {
+            latest_version: None,
+            checked_at,
+            warnings: vec![format!("latest release check failed: {err}")],
+        },
+    }
+}
+
+fn write_cache(path: &Path, cache: &VersionCache) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(cache)?)?;
+    Ok(())
+}
+
+fn strip_v(version: &str) -> &str {
+    version.strip_prefix('v').unwrap_or(version)
+}
+
+fn version_is_newer(current: &str, latest: &str) -> bool {
+    let current = parse_version(current);
+    let latest = parse_version(latest);
+    latest > current
+}
+
+fn parse_version(version: &str) -> Vec<u64> {
+    strip_v(version)
+        .split('.')
+        .map(|part| {
+            part.chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 fn release_target() -> Result<String> {

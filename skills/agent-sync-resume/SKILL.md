@@ -8,6 +8,22 @@ compatibility: Requires the agent-sync binary on PATH and shell access.
 
 Use `agent-sync` as the source of truth. Confirm the conversation before resuming.
 
+## Version Check
+
+At the start of setup or resume work, run:
+
+```bash
+agent-sync version-check
+```
+
+If it reports `update_available: true`, tell the user and run:
+
+```bash
+agent-sync update
+```
+
+Then continue with the original task.
+
 ## Resume
 
 ```bash

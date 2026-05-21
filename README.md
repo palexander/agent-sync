@@ -125,6 +125,7 @@ agent-sync checkpoint --cwd "$PWD" --summary "compact state"
 agent-sync checkpoint --new --cwd "$PWD" --title "new task" --summary "compact state"
 agent-sync install all
 agent-sync update
+agent-sync version-check
 agent-sync validate-sync
 agent-sync storage
 agent-sync prune --older-than 30d
@@ -146,6 +147,7 @@ Key commands:
 - `sandbox`: Reports whether the process can write the sync root and local `.git` metadata.
 - `install`: Installs global agent skills and hooks for `codex`, `claude`, or `all`.
 - `update`: Downloads the latest release, verifies its checksum, replaces the installed binary, reruns `install all`, and returns JSON diagnostics.
+- `version-check`: Checks the latest GitHub release at most once per hour and reports whether `agent-sync update` should be run.
 - `doctor --hooks --storage`: Validates hook config, skill installation, and storage visibility.
 - `validate-sync`: Performs a write/read/delete probe against the configured sync root.
 - `prune`: Dry-runs removal of unreferenced objects. Add `--execute` to delete them.
