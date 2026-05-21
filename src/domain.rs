@@ -119,6 +119,7 @@ pub struct HookProvenance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     ConversationCreated {

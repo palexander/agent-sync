@@ -30,7 +30,34 @@ agent-sync doctor --hooks --storage
 
 All agent-facing commands print JSON.
 
-## Global install
+## Install From Release
+
+The recommended install path is the latest GitHub release binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/palexander/agent-sync/main/scripts/install-release.sh | bash
+```
+
+The installer detects macOS/Linux and CPU architecture, downloads the matching release tarball, verifies its SHA-256 checksum, installs `agent-sync` to `~/.local/bin`, then runs:
+
+```bash
+agent-sync install all
+agent-sync doctor --hooks --storage
+```
+
+If `~/.local/bin` is not on your `PATH`, add this to your shell profile:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Supported release targets:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `x86_64-unknown-linux-gnu`
+
+## Local Install
 
 ```bash
 cargo install --path /Users/palexander/Documents/agent-sync --force
@@ -46,6 +73,19 @@ bash /Users/palexander/Documents/agent-sync/scripts/install.sh
 ```
 
 That builds the binary, installs both skills/hooks, runs hook/storage diagnostics, and validates the configured sync root.
+
+## Release Process
+
+CI runs formatting, Clippy, and tests on pushes to `main` and pull requests.
+
+To publish a release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds platform tarballs, publishes checksum files, and creates a GitHub release with generated notes.
 
 ## Handoff behavior
 
