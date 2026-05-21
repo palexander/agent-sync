@@ -199,6 +199,19 @@ pub struct InstallReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateReport {
+    pub updated: bool,
+    pub from_version: String,
+    pub to_version: String,
+    pub target: String,
+    pub binary_path: PathBuf,
+    pub commands: Vec<CommandOutcome>,
+    pub install_report: Option<Vec<InstallReport>>,
+    pub doctor: Option<serde_json::Value>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookDoctorReport {
     pub targets: Vec<HookTargetDoctorReport>,
     pub ok: bool,

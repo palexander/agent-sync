@@ -8,6 +8,7 @@ mod hooks;
 mod install;
 mod mcp;
 mod storage;
+mod update;
 
 #[tokio::main]
 async fn main() {

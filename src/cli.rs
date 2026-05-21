@@ -1,6 +1,6 @@
 use crate::app::AgentSync;
 use crate::config::Config;
-use crate::{daemon, hooks, install, mcp};
+use crate::{daemon, hooks, install, mcp, update};
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -78,6 +78,7 @@ enum Command {
     Install {
         target: InstallTargetArg,
     },
+    Update,
     ValidateSync,
     Storage,
     Prune {
@@ -242,6 +243,10 @@ pub async fn run() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&install::install(target)?)?
             );
+            Ok(())
+        }
+        Command::Update => {
+            println!("{}", serde_json::to_string_pretty(&update::update()?)?);
             Ok(())
         }
         Command::ValidateSync => {
