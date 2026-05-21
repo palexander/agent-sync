@@ -1,3 +1,33 @@
+# Rust build output
 /target/
+
+# Local manual/e2e fixtures
 /e2e/
 /e2e-*/
+/tmp/
+/scratch/
+
+# Local agent-sync stores and caches if created in the repo
+/agent-sync/
+/sync/
+/cache/
+/cache-*/
+
+# Logs and transient command output
+*.log
+*.out
+*.err
+
+# OS/editor noise
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local environment overrides
+.env
+.env.*
+!.env.example
