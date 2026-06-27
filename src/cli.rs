@@ -82,6 +82,8 @@ enum Command {
     VersionCheck,
     ValidateSync,
     Storage,
+    /// Rebuild the conversation lookup index (one-time migration).
+    Reindex,
     Prune {
         #[arg(long)]
         execute: bool,
@@ -265,6 +267,12 @@ pub async fn run() -> Result<()> {
         Command::Storage => {
             let app = AgentSync::new(config)?;
             println!("{}", serde_json::to_string_pretty(&app.storage_stats()?)?);
+            Ok(())
+        }
+        Command::Reindex => {
+            let app = AgentSync::new(config)?;
+            let count = app.reindex()?;
+            println!("{}", serde_json::json!({ "indexed": count }));
             Ok(())
         }
         Command::Prune {

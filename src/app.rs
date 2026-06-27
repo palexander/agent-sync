@@ -93,6 +93,12 @@ impl AgentSync {
         self.store.read_conversation(id)
     }
 
+    /// One-time migration: rebuild the conversation index from the registry.
+    /// Returns the number of indexed (remote, branch) keys.
+    pub fn reindex(&self) -> Result<usize> {
+        self.store.rebuild_index()
+    }
+
     pub fn create_checkpoint(&self, input: CheckpointInput) -> Result<Checkpoint> {
         let now = Utc::now();
         let repo = git::snapshot_repo(&input.cwd);
@@ -508,15 +514,27 @@ impl AgentSync {
     }
 
     fn match_conversation(&self, repo: &RepoState) -> Result<Option<Conversation>> {
-        for conversation in self.store.list_conversations()? {
-            if conversation.primary_repo.remote_url == repo.remote_url
-                && conversation.primary_repo.branch == repo.branch
-                && repo.remote_url.is_some()
+        // Tier 0: a repo with no remote can never match an existing conversation,
+        // so skip the registry entirely instead of reading every file to return
+        // `None` (the path that blocks on cloud-only iCloud files).
+        let Some(key) = crate::storage::repo_index_key(repo) else {
+            return Ok(None);
+        };
+        // Tier 1: resolve via the index (one read) instead of scanning all
+        // conversations. Re-verify the resolved conversation still matches, so a
+        // stale index entry degrades to a miss rather than a wrong match.
+        let Some(id) = self.store.index_lookup(&key)? else {
+            return Ok(None);
+        };
+        match self.store.read_conversation(&id) {
+            Ok(conversation)
+                if conversation.primary_repo.remote_url == repo.remote_url
+                    && conversation.primary_repo.branch == repo.branch =>
             {
-                return Ok(Some(conversation));
+                Ok(Some(conversation))
             }
+            _ => Ok(None),
         }
-        Ok(None)
     }
 
     #[cfg(test)]

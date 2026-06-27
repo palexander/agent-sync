@@ -1,11 +1,21 @@
-use crate::domain::{Checkpoint, Conversation, Event};
+use crate::domain::{Checkpoint, Conversation, Event, RepoState};
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+
+/// Build the lookup key for the conversation index from a repo's identity.
+/// Returns `None` when the repo has no remote, since such conversations are
+/// never matched by `match_conversation` and must not be indexed.
+pub fn repo_index_key(repo: &RepoState) -> Option<String> {
+    let url = repo.remote_url.as_ref()?;
+    // `\n` is a safe separator: it cannot appear in a git remote URL or branch.
+    Some(format!("{}\n{}", url, repo.branch.as_deref().unwrap_or("")))
+}
 
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -69,7 +79,57 @@ impl Store {
                 .join("registry/conversations")
                 .join(format!("{}.json", conversation.id)),
             conversation,
-        )
+        )?;
+        // Keep the index current so `match_conversation` stays O(1) and never
+        // has to scan the whole registry (which blocks on cloud-only files).
+        if let Some(key) = repo_index_key(&conversation.primary_repo) {
+            self.index_upsert(&key, &conversation.id)?;
+        }
+        Ok(())
+    }
+
+    fn index_path(&self) -> PathBuf {
+        self.root.join("registry/index.json")
+    }
+
+    /// Read the `(remote_url, branch) -> conversation_id` index. Returns an
+    /// empty map when the index does not yet exist.
+    pub fn read_index(&self) -> Result<HashMap<String, String>> {
+        let path = self.index_path();
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+        self.read_json(&path)
+    }
+
+    /// Look up a single conversation id by index key without touching the rest
+    /// of the registry. This is the hot path used on every checkpoint.
+    pub fn index_lookup(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.read_index()?.get(key).cloned())
+    }
+
+    fn index_upsert(&self, key: &str, conversation_id: &str) -> Result<()> {
+        let mut index = self.read_index()?;
+        if index.get(key).map(String::as_str) == Some(conversation_id) {
+            return Ok(());
+        }
+        index.insert(key.to_string(), conversation_id.to_string());
+        self.write_json(&self.index_path(), &index)
+    }
+
+    /// Rebuild the index from scratch by scanning every conversation once.
+    /// Used as a one-time migration; this is the only place that still pays the
+    /// full-registry read cost, and it is off the hot path.
+    pub fn rebuild_index(&self) -> Result<usize> {
+        let mut index = HashMap::new();
+        for conversation in self.list_conversations()? {
+            if let Some(key) = repo_index_key(&conversation.primary_repo) {
+                index.insert(key, conversation.id.clone());
+            }
+        }
+        let count = index.len();
+        self.write_json(&self.index_path(), &index)?;
+        Ok(count)
     }
 
     pub fn list_conversations(&self) -> Result<Vec<Conversation>> {
